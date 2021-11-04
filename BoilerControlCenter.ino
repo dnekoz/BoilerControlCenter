@@ -21,6 +21,7 @@ LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+bool isRTCReady = false;
 
 int A0Value = 0;
 #define Active_buzzer D3
@@ -37,6 +38,25 @@ void ICACHE_RAM_ATTR isrDT();
 
 volatile char directionEncoder = ' ';
 
+// OpenTherm adapter
+#include <OpenTherm.h>
+const int inPin  = D8; //for Arduino, 4 for ESP8266 (D2), 21 for ESP32
+const int outPin = D7; //for Arduino, 5 for ESP8266 (D1), 22 for ESP32
+OpenTherm ot(inPin, outPin);
+
+bool enableCentralHeating = true;
+bool enableHotWater       = false;
+bool enableCooling        = false;
+int defaultTemperature    = 50;
+
+String centralHeating = "";
+String hotWater       = "";
+String flame          = "";
+
+void ICACHE_RAM_ATTR handleInterrupt() {
+  ot.handleInterrupt();
+}
+
 void setup() {
   Serial.begin(9600);
 
@@ -47,7 +67,7 @@ void setup() {
   digitalWrite(Active_buzzer, LOW);
 
 
-  Serial.println("Screen init...");
+  //Serial.println("Screen init...");
   lcd.init();
   // Print a message to the LCD.
   lcd.backlight();
@@ -65,6 +85,8 @@ void setup() {
   delay(1000);
 
   // Wi-Fi connect
+  lcd.setCursor(0, 1);
+  lcd.print("Connecting Wi-Fi...");
   WiFi.mode(WIFI_STA);
   WiFiManager wm;
   bool res;
@@ -73,7 +95,7 @@ void setup() {
   res = wm.autoConnect("AutoConnectAP", "password"); // password protected ap
 
   if (!res) {
-    Serial.println("Unable to connect to WiFi!");
+    //Serial.println("Unable to connect to WiFi!");
     lcd.setCursor(3, 0);
     lcd.print("Unable to connect to WiFi!");
     digitalWrite(Active_buzzer, HIGH);
@@ -83,9 +105,9 @@ void setup() {
   }
   else {
     //if you get here you have connected to the WiFi
-    Serial.println("Wi-Fi connected!");
+    //Serial.println("Wi-Fi connected!    ");
     lcd.setCursor(0, 1);
-    lcd.print("Wi-Fi connected!");
+    lcd.print("Wi-Fi connected!    ");
     digitalWrite(Active_buzzer, HIGH);
     delay(100);
     digitalWrite(Active_buzzer, LOW);
@@ -105,22 +127,29 @@ void setup() {
   timeClient.update();
 
   unsigned long epochTime = timeClient.getEpochTime();
-  Serial.print("Epoch Time: ");
-  Serial.println(epochTime);
+  ////Serial.print("Epoch Time: ");
+  //Serial.println(epochTime);
 
   String formattedTime = timeClient.getFormattedTime();
-  Serial.print("Formatted Time: ");
-  Serial.println(formattedTime);
+  //Serial.print("Formatted Time: ");
+  //Serial.println(formattedTime);
 
   if (! rtc.begin()) {
-    Serial.println("Couldn't find RTC");
-    delay(10000);
-    Serial.flush();
-    abort();
+    //Serial.println("Couldn't find RTC");
+    lcd.setCursor(0, 2);
+    lcd.print("RTC fault!");
+    lcd.setCursor(0, 3);
+    lcd.print("STOP!");
+    while (isRTCReady == false) {
+      digitalWrite(Active_buzzer, HIGH);
+      delay(1000);
+      digitalWrite(Active_buzzer, LOW);
+      delay(500);
+    };
   }
-
+  isRTCReady = true;
   //  if (rtc.lostPower()) {
-  Serial.println("RTC lost power, let's set the time!");
+  //Serial.println("RTC lost power, let's set the time!");
   rtc.adjust(DateTime(timeClient.getEpochTime()));
   lcd.setCursor(0, 2);
   lcd.print("Time synchronized!");
@@ -133,8 +162,32 @@ void setup() {
   attachInterrupt(CLK, isrCLK, CHANGE);    // прерывание на 2 пине! CLK у энка
   attachInterrupt(DT, isrDT, CHANGE);    // прерывание на 3 пине! DT у энка
 
-  lcd.clear();
+  lcd.setCursor(0, 3);
 
+  ot.begin(handleInterrupt);
+
+  unsigned long response = ot.setBoilerStatus(enableCentralHeating, enableHotWater, enableCooling);
+
+  OpenThermResponseStatus responseStatus = ot.getLastResponseStatus();
+
+  if (responseStatus == OpenThermResponseStatus::SUCCESS) {
+    lcd.print("OpenThem connected!");
+    digitalWrite(Active_buzzer, HIGH);
+    delay(100);
+    digitalWrite(Active_buzzer, LOW);
+  }
+  if (responseStatus == OpenThermResponseStatus::NONE) {
+    Serial.println("Error: OpenTherm is not initialized");
+  }
+  else if (responseStatus == OpenThermResponseStatus::INVALID) {
+    Serial.println("Error: Invalid response " + String(response, HEX));
+  }
+  else if (responseStatus == OpenThermResponseStatus::TIMEOUT) {
+    Serial.println("Error: Response timeout");
+  }
+
+  delay(1000);
+  lcd.clear();
 }
 
 void isrCLK() {
@@ -142,7 +195,7 @@ void isrCLK() {
   encoder.tick();
   if (encoder.isRight()) directionEncoder = 'R';
   if (encoder.isLeft())  directionEncoder = 'L';
-  Serial.println(directionEncoder);
+  //Serial.println(directionEncoder);
   /*
      lcd.setCursor(0, 2);
      lcd.print("Rotary:");
@@ -153,7 +206,7 @@ void isrDT() {
   encoder.tick();
   if (encoder.isRight()) directionEncoder = 'R';
   if (encoder.isLeft())  directionEncoder = 'L';
-  Serial.println(directionEncoder);
+  //Serial.println(directionEncoder);
   /*
      lcd.setCursor(0, 2);
      lcd.print("Rotary:");
@@ -164,23 +217,52 @@ void isrDT() {
 void loop(void) {
   encoder.tick();
   DateTime now = rtc.now();
-  Serial.print(now.year(), DEC);
-  Serial.print('/');
-  Serial.print(now.month(), DEC);
-  Serial.print('/');
-  Serial.print(now.day(), DEC);
-  Serial.print(" (");
-  Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
-  Serial.print(") ");
-  Serial.print(now.hour(), DEC);
-  Serial.print(':');
-  Serial.print(now.minute(), DEC);
-  Serial.print(':');
-  Serial.print(now.second(), DEC);
-  Serial.println();
+  //Set/Get Boiler Status
 
-  Serial.print("Temp: ");            // Отправка текста в Serial Port
-  Serial.println(rtc.getTemperature()); // Отправка в Serial Port температуру
+  unsigned long response = ot.setBoilerStatus(enableCentralHeating, enableHotWater, enableCooling);
+
+  OpenThermResponseStatus responseStatus = ot.getLastResponseStatus();
+  if (responseStatus == OpenThermResponseStatus::SUCCESS) {
+    centralHeating = String(ot.isCentralHeatingActive(response) ? "ON" : "OFF");
+    hotWater       = String(ot.isHotWaterActive(response) ? "ON" : "OFF");
+    flame          = String(ot.isFlameOn(response) ? "ON" : "OFF");
+    Serial.println("Central Heating: " + centralHeating);
+    // Serial.println("Hot Water: " + hotWater);
+    Serial.println("Flame: " + flame);
+    if ((centralHeating == "OFF") && (enableCentralHeating)) {
+      unsigned char boilerFault = ot.getFault();
+      Serial.println(boilerFault, HEX);
+    }
+  }
+  if (responseStatus == OpenThermResponseStatus::NONE) {
+    Serial.println("Error: OpenTherm is not initialized");
+  }
+  else if (responseStatus == OpenThermResponseStatus::INVALID) {
+    Serial.println("Error: Invalid response " + String(response, HEX));
+  }
+  else if (responseStatus == OpenThermResponseStatus::TIMEOUT) {
+    Serial.println("Error: Response timeout");
+  }
+
+  //Set Boiler Temperature to 64 degrees C
+  ot.setBoilerTemperature(60);
+
+  //Get Boiler Temperature
+  float ch_temperature = ot.getBoilerTemperature();
+  Serial.println("CH temperature is " + String(ch_temperature) + " degrees C");
+
+  lcd.setCursor(0, 3);
+  lcd.print("Flame:" + flame + " BWT:" + String(ch_temperature));
+
+  // Set DHW setpoint to 40 degrees C
+  // ot.setDHWSetpoint(40);
+
+  // Get DHW Temperature
+  // float dhw_temperature = ot.getDHWTemperature();
+  // Serial.println("DHW temperature is " + String(dhw_temperature) + " degrees C");
+
+  Serial.println();
+  delay(750);
 
   lcd.setCursor(0, 0);                // Устанавливаем курсор на 0 строку, ячейка 0
   if (now.hour() < 10) {
